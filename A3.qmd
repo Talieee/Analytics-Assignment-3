@@ -1,0 +1,181 @@
+---
+title: "Analytics assignment 3"
+format: pdf
+editor: visual
+---
+
+## Cleaning Data
+
+```{r}
+library(tidyverse)
+library(corrr)
+dat <- Airbnb_Excel_Lab_AAMB_Co
+```
+
+## Sort out any missing values
+
+```{r}
+str(dat)
+dim(dat) # 16317 40; before cleaning
+
+head(dat)
+
+#removed repeated rows
+dat <- distinct(dat) # no duplicates were found
+
+# removed the first 7 rows, did not seem relevant to what we are tyring to explore with the data 
+dat <- dat[, -c(1,2,3,4,5,6, 7)] 
+
+#sorting out categorical variables 
+dat$Neighbourhood_Cleansed <- as.factor(dat$Neighbourhood_Cleansed)
+dat$`Room_Type_Proper & Trim` <- as.factor(dat$`Room_Type_Proper & Trim`)
+
+# roomtypeproper $ trim is the same as property type & proper trim so remove the first 1 
+dat <- dat[, -4]
+
+#missing values 
+indices_missing <- which(is.na(dat))
+missing_dat <- dat[indices_missing,]
+head(missing_dat)
+# NA'S were found for all the values there so will just remove those observations from the dataset. It was 52 observations which is less than 1% of our data set which is fine.
+
+#removed missing values 
+dat <-na.omit(dat)
+dim(dat) # 16288 32 
+
+#make dummys for categorical variables
+#table(dat$`Room_Type_Proper & Trim`)
+
+dat <- dat %>% 
+  mutate(
+    entire_home = as.integer(dat$`Room_Type_Proper & Trim` == "Entire Home/Apt"),
+    hotel_room = as.integer(dat$`Room_Type_Proper & Trim` == "Hotel Room"),
+    pvt_room = as.integer(dat$`Room_Type_Proper & Trim` == "Private Room"),
+    shared_room = as.integer(dat$`Room_Type_Proper & Trim` == "Shared Room")
+  )
+
+dat <- dat %>% 
+  select(- `Room_Type_Proper & Trim`)
+
+
+#remove non revenue listings. They may not be beneficicial to what we are trying to determine. 
+dat <- dat %>% 
+  filter(Revenue_365 != 0) 
+dim(dat) # 15851 35
+
+#New variables 
+# overall score 
+dat <- dat %>% 
+  mutate(
+    avg_score = round((Review_Scores_Accuracy + Review_Scores_Cleanliness + Review_Scores_Checkin + Review_Scores_Communication + Review_Scores_Location + Review_Scores_Value)/6, 2)
+  )
+
+#occupancy rate 
+dat <- dat %>% 
+  mutate(
+    occupancy_rate = round((Booked_365/365)*100, 2)
+)
+
+
+#ward averages for 70 of the wards that are not missing values and have active listings
+Ward_avg <- dat %>% 
+  group_by(Neighbourhood_Cleansed) %>% 
+  summarise_all(., mean)
+
+#remove Neighbourhood_Cleansed, we already have the geo co-ordinates
+dat <- dat %>% 
+  select(-Neighbourhood_Cleansed)
+
+
+summary(dat)
+
+highly_corr <- dat %>% 
+  correlate() %>% 
+  stretch() %>% 
+  filter(abs(r) > 0.85) %>% 
+  arrange(desc(abs(r)))
+  
+highly_corr
+
+#remove availabily anf booked since we have occupancy rate
+dat <- dat %>% 
+  select(- c(Booked_30, Booked_60, Booked_90, Booked_365, Availability_30, Availability_60, Availability_90, Availability_365))
+
+#remove the scores individually because captured by avg and scores rating
+dat <- dat %>% 
+  select(- c(Review_Scores_Accuracy, Review_Scores_Cleanliness, Review_Scores_Communication, Review_Scores_Location, Review_Scores_Checkin, Review_Scores_Value))
+
+
+```
+
+## PCA 
+
+```{r}
+
+pca_output <- prcomp(dat, center = TRUE, scale. = TRUE)
+summary(pca_output)
+
+plot(pca_output$sdev, type = "b")
+
+vars <- pca_output$sdev^2
+prop_var <- vars / sum(vars)
+cum_var <- cumsum(prop_var) # choose the first 2 PC's
+
+loadings <- pca_output$rotation[,1:6]
+
+
+```
+
+Here is your **Component Breakdown**:
+
+### **PC1: The "Scale & Revenue" Axis (31-35% Loading)**
+
+This is your "Big Business" component.
+
+- **Top Loadings:** `Price`, `Revenue_365`, `Bedrooms`, `Bathrooms`, and `Accommodates`.
+
+- **Interpretation:** This component separates high-value, large properties from smaller, cheaper ones. Since it is heavily loaded on both size and revenue, it represents the **Economic Power** of the listing.
+
+### **PC2: The "Popularity & Activity" Axis (40-50% Loading)**
+
+This is the "Hustle" component.
+
+- **Top Loadings:** `Number_of_reviews`, `Number_of_Reviews_ltm`, and `Reviews_per_Month`.
+
+- **Interpretation:** Interestingly, these loadings are **negative** (-0.40 to -0.50). This just means that as you move *left* on the PC2 axis, the listings become much more "active" with higher turnover. It captures how frequently a place is being booked, regardless of its price.
+
+### **PC3: The "Short-Term Yield" Axis**
+
+- **Top Loadings:** `Revenue_30`, `Revenue_60`, and `Revenue_90`.
+
+- **Interpretation:** Notice how these are grouped differently than `Revenue_365`. This PC captures listings that are currently "hot" or performing very well in the short term, versus those that have steady long-term annual income.
+
+### **PC4: The "Guest Experience" Axis**
+
+- **Top Loadings:** `Review_Scores_Rating` (-0.63) and `avg_score` (-0.63).
+
+- **Interpretation:** This is almost purely about **Quality**. It separates the "Superhosts" from the lower-rated listings.
+
+### **PC5: The "Property Type" Axis**
+
+- **Top Loadings:** `entire_home` (0.52) vs. `pvt_room` (-0.50).
+
+- **Interpretation:** This is a "Binary Toggle." It distinguishes between listings that offer the whole house versus those offering just a room.
+
+### **PC6: The "Spatial" Axis**
+
+- **Top Loadings:** `Latitude` (-0.62) and `Longitude` (0.69).
+
+- **Interpretation:** This is your **Geography** driver. In Cape Town, this likely represents the "Atlantic Seaboard vs. The Rest" or "City vs. Suburbs" split.
+
+**recommend using PC1 through PC5.**
+
+- **PC1:** How big/expensive?
+
+- **PC2:** How busy?
+
+- **PC3:** Current demand?
+
+- **PC4:** How good is the service?
+
+- **PC5:** House or Room?

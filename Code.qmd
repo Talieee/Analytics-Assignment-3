@@ -1,0 +1,133 @@
+---
+title: "Analytics Assignment 3 - Cluster Analysis"
+author: "Natalie Chidikwindi & Lihle Sigenu"
+format: pdf
+editor: visual
+---
+
+```{r}
+#| label: libraries & read data
+#| warning: false
+#| include: false
+
+# install.packages("dplyr")
+library(dplyr)
+# install.packages("ggcorrplot")
+library(ggcorrplot)
+library(ggplot)
+
+listings <- Airbnb_Excel_Lab_AAMB_Co
+```
+
+# Exploratory Data Analysis
+
+Any analysis starts with knowing your data, therefore in this part of the assignment, you are expected to check all your variables first, use str() to see the types of your variables. You are also expected to detect any discrepancies/anomalies/missing values in your dataset using any or all of the following: tables, summaries, frequencies, plots. If need be, you may apply some dimension reduction techniques.
+
+Some useful data preprocessing:
+
+-   clean and variable mutate
+
+-   dummy variables
+
+-   data overview
+
+-   ward level averages
+
+```{r}
+#| label: na-checking
+#| echo: false
+#| warning: false
+
+################################################################
+# Create a table containing variable type and % of missing values
+################################################################
+vars <- colnames(listings) # variable names
+
+# Create variable of # of missing variables in each column
+missing <- c()
+var_type <- c()
+for (i in 1:(dim(listings)[2])) {
+  missing[i] <- sum(is.na(listings[,i]))
+  var_type <- class(listings[,i])
+}
+missing_table <- data.frame(variable = vars, missing_vals = missing, type = var_type)
+
+# Drop Neighbourhood proper and trim
+listings <- listings %>% 
+  select(-`Neighbourhood_Proper & Trim`)
+
+# Drop na obs
+listings <- na.omit(listings)
+```
+
+```{r}
+#| label: variable summaries
+#| echo: false
+#| warning: false
+
+# Create a table of data summaries
+sum_matrix <- matrix(NA, nrow = dim(listings)[2] - 12, ncol = 4)
+colnames(sum_matrix) <- c("Min", "Median", "Mean", "Max")
+rownames(sum_matrix) <- names(listings)[13:dim(listings)[2]]
+
+for (i in 13:dim(listings)[2]) {
+
+  x <- unlist(listings[, i])
+
+  sum_matrix[i - 12, ] <- c(
+    min(x, na.rm = TRUE),
+    median(x, na.rm = TRUE),
+    round(mean(x, na.rm = TRUE),3),
+    max(x, na.rm = TRUE)
+  )
+}
+skewness <- sum_matrix[,3] - sum_matrix[,2]
+sum_matrix <- cbind(sum_matrix, skewness)
+# Problem is that private rooms are listed as having 50 beds/baths
+# Max bathrooms is 50 because all bathrooms in a B&B are listed
+# Max bedrooms is 50 also as above
+```
+
+```{r}
+#| label: plots
+#| echo: false
+#| warning: false
+
+# Histogram of prices
+hist(listings$Price)
+
+# Latitude vs Longitude
+plot(listings$Longitude ~ listings$Latitude)
+
+# Checking average variables for different wards
+ward_data <- listings %>%  
+  group_by(Neighbourhood_Cleansed) %>% 
+  summarise(AvgPrice = mean(Price, na.rm = T),
+            AvgBedrooms = mean(Bedrooms, na.rm = T),
+            AvgBathrooms = mean(Bathrooms, na.rm = T),
+            AvgCapacity = mean(Accommodates, na.rm = T),
+            AvgRating = mean(Review_Scores_Value, na.rm = T)) %>% 
+  arrange(-AvgPrice)
+
+# Plot the average price for wards against other variables
+plot(ward_data$AvgPrice ~ ward_data$AvgBedrooms)
+plot(ward_data$AvgPrice ~ ward_data$AvgBathrooms)
+plot(ward_data$AvgPrice ~ ward_data$AvgCapacity)
+plot(ward_data$AvgPrice ~ ward_data$AvgRating)
+```
+
+```{r}
+#| label: corr-plots
+#| echo: false
+#| warning: false
+
+# Corr plot between ward average vars
+cor(ward_data[,-1])
+
+# Corr plot between original vars
+numeric_vars <- listings %>% 
+  select(-c("ID","Picture_URL", "Host_ID", "Host_Name_Trimmed & Proper", "Neighbourhood_Cleansed", "Property_Type_Proper & Trim", "Room_Type_Proper & Trim"))
+cor_numerics <- cor(numeric_vars)
+ggcorrplot(cor_numerics, type = "lower") +
+  theme(axis.text.x = element_text(angle = 90))
+```

@@ -1,0 +1,621 @@
+---
+title: "Analytics assignment 3"
+format: pdf
+editor: visual
+---
+
+## Cleaning Data
+
+```{r}
+library(tidyverse)
+library(corrr)
+library(factoextra)
+library(FactoMineR)
+library(NbClust)
+library(cluster)
+library(mclust)
+
+dat <- Airbnb_Excel_Lab_AAMB_Co
+```
+
+## Sort out any missing values
+
+```{r}
+str(dat)
+dim(dat) # 16317 40; before cleaning
+
+head(dat)
+
+#removed repeated rows
+dat <- distinct(dat) # no duplicates were found
+
+# removed the first 7 rows, did not seem relevant to what we are tyring to explore with the data 
+dat <- dat[, -c(1,2,3,4,5,6, 7)] 
+
+#sorting out categorical variables 
+dat$Neighbourhood_Cleansed <- as.factor(dat$Neighbourhood_Cleansed)
+dat$`Room_Type_Proper & Trim` <- as.factor(dat$`Room_Type_Proper & Trim`)
+
+# roomtypeproper $ trim is the same as property type & proper trim so remove the first 1 
+dat <- dat[, -4]
+
+#missing values 
+indices_missing <- which(is.na(dat))
+missing_dat <- dat[indices_missing,]
+head(missing_dat)
+# NA'S were found for all the values there so will just remove those observations from the dataset. It was 52 observations which is less than 1% of our data set which is fine.
+
+#removed missing values 
+dat <-na.omit(dat)
+dim(dat) # 16288 32 
+
+#make dummys for categorical variables
+#table(dat$`Room_Type_Proper & Trim`)
+
+dat <- dat %>% 
+  mutate(
+    entire_home = as.integer(dat$`Room_Type_Proper & Trim` == "Entire Home/Apt"),
+    hotel_room = as.integer(dat$`Room_Type_Proper & Trim` == "Hotel Room"),
+    pvt_room = as.integer(dat$`Room_Type_Proper & Trim` == "Private Room"),
+    shared_room = as.integer(dat$`Room_Type_Proper & Trim` == "Shared Room")
+  )
+
+dat <- dat %>% 
+  select(- `Room_Type_Proper & Trim`)
+
+
+#remove non revenue listings. They may not be beneficicial to what we are trying to determine. 
+dat <- dat %>% 
+  filter(Revenue_365 != 0) 
+dim(dat) # 15851 35
+
+#New variables 
+# overall score 
+dat <- dat %>% 
+  mutate(
+    avg_score = round((Review_Scores_Accuracy + Review_Scores_Cleanliness + Review_Scores_Checkin + Review_Scores_Communication + Review_Scores_Location + Review_Scores_Value)/6, 2)
+  )
+
+#occupancy rate 
+dat <- dat %>% 
+  mutate(
+    occupancy_rate = round((Booked_365/365)*100, 2)
+)
+
+
+#ward averages for 70 of the wards that are not missing values and have active listings
+Ward_avg <- dat %>% 
+  group_by(Neighbourhood_Cleansed) %>% 
+  summarise_all(., mean)
+
+#remove Neighbourhood_Cleansed, we already have the geo co-ordinates
+dat <- dat %>% 
+  select(-Neighbourhood_Cleansed)
+
+
+summary(dat)
+
+highly_corr <- dat %>% 
+  correlate() %>% 
+  stretch() %>% 
+  filter(abs(r) > 0.85) %>% 
+  arrange(desc(abs(r)))
+  
+highly_corr
+
+#remove availabily anf booked since we have occupancy rate
+dat <- dat %>% 
+  select(- c(Booked_30, Booked_60, Booked_90, Booked_365, Availability_30, Availability_60, Availability_90, Availability_365))
+
+#remove the scores individually because captured by avg and scores rating
+dat <- dat %>% 
+  select(- c(Review_Scores_Accuracy, Review_Scores_Cleanliness, Review_Scores_Communication, Review_Scores_Location, Review_Scores_Checkin, Review_Scores_Value))
+
+#remove entire home so there is no multicollinearity
+dat <- dat[,-17]
+
+save(dat, Ward_avg, file = "cleaning.RData")
+load("cleaning.RData")
+```
+
+## Constructing PCA & Clustering Variables
+
+Going to do both on the PC's and the variables and then we can decide which is better
+
+Variables for clustering
+
+- `Price`, `Revenue_365`, `Bedrooms`, `Bathrooms`, and `Accommodates`
+
+- `Reviews_per_Month`
+
+- `avg_score`, `occupancy_score`,
+
+- `entire_home` , `pvt_room,`, `shared_room` and `hotel_room`
+
+- `Latitude` , `Longitude`
+
+```{r}
+#for clustering variables
+# put all these variables into 1 dataframe
+clustering_variables <- data.frame(dat$Price, dat$Revenue_365, dat$Bedrooms, dat$Bathrooms, dat$Accommodates, dat$Reviews_per_Month, dat$avg_score, dat$occupancy_rate, dat$shared_room, dat$pvt_room, dat$hotel_room, dat$Latitude, dat$Longitude)
+
+dim(clustering_variables) # 15851 13
+
+#renamed the column names so that they didnt have dat before them
+colnames(clustering_variables) <- c("Price", "Revenue_365", "Bedrooms", "Bathrooms", "Accommodates", "Reviews_per_Month", "avg_score", "occupancy_score", "shared_room", "pvt_room","hotel_room", "Latitude", "Longitude")
+
+#scaled the variables 
+scaled_clustering_vars <- scale(clustering_variables)
+```
+
+```{r}
+#PCA
+pca_output <- PCA(clustering_variables,scale.unit = T,graph = FALSE, ncp = 10)
+fviz_eig(pca_output)
+
+#choose the first 6 eigen values
+inerita_perc <- pca_output$eig[,3]
+
+#loadings
+pca_loadings <- pca_output$var$coord[,1:6]
+
+#scores
+pca_scores <- pca_output$ind$coord[,1:6]
+
+save(scaled_clustering_vars, pca_output, pca_scores, inerita_perc, file = "cluster vars and PCA.RData")
+load("cluster vars and PCA.RData")
+```
+
+## Hierarchical Clustering
+
+##### distance matrix calculation
+
+```{r}
+
+dist_matrix <- dist(scaled_clustering_vars, method = "euclidean")
+```
+
+##### PC's score distance matrix calculation:
+
+```{r}
+pca_dist_matrix <- dist(pca_scores, method = "euclidean")
+
+save(dist_matrix, pca_dist_matrix, file = "distance matrices.RData")
+load("distance matrices.RData")
+```
+
+### Complete Linkage
+
+##### For variables
+
+```{r}
+
+var_complete_euc <- hclust(dist_matrix, method = "complete")
+
+```
+
+##### For PC's
+
+```{r}
+pca_complete_euc <- hclust(pca_dist_matrix, method = "complete")
+
+save(var_complete_euc, pca_complete_euc, file = "Complete linkage full.RData")
+load("Complete linkage full.RData")
+```
+
+### Determining where to cut the dendrogram
+
+Decided to use NbClust to find how many clusters for Complete Linkage, the silhouette method, elbow method and Gap statistic.
+
+#### subsetting the data
+
+Decided to use a sample of the data to do the choosing of k as the HC methods are computationally exhaustive
+
+```{r}
+#the sample is 1k obs for each
+set.seed(321)
+sample_dat <- scaled_clustering_vars[sample(1:nrow(scaled_clustering_vars), 1000, replace = F),]
+
+sample_pca <- pca_scores[sample(1:nrow(pca_scores), 1000, replace = F),]
+```
+
+#### NbClust
+
+```{r}
+nbclust_pca_complete <- NbClust(data = sample_pca,
+                         distance = "euclidean",
+                         min.nc = 2,
+                         max.nc = 10,
+                         method = "complete")
+save(nbclust_pca_complete, file = "nbclust_complete.RData")
+load("nbclust_complete.RData")
+```
+
+consensus: k = 2
+
+#### Elbow method: PCA and cluster vars
+
+```{r}
+within_variation_manual <- function(X, cluster) {
+  
+  clusters <- unique(cluster)
+  results <- data.frame(
+    cluster = clusters,
+    n = NA,
+    within_variation = NA
+  )
+  
+  total_within <- 0
+  
+  for (k in clusters) {
+    
+    # Points in cluster k
+    Xk <- X[cluster == k, , drop = FALSE]
+    
+    # Cluster centroid
+    centroid <- colMeans(Xk)
+    
+    # Squared distances to centroid
+    squared_distances <- rowSums((sweep(Xk, 2, centroid, "-"))^2)
+    
+    # Within variation for cluster k
+    Wk <- sum(squared_distances)
+    
+    results[results$cluster == k, "n"] <- nrow(Xk)
+    results[results$cluster == k, "within_variation"] <- Wk
+    
+    total_within <- total_within + Wk
+  }
+  
+  list(
+    by_cluster = results,
+    total_within_variation = total_within
+  )
+}
+```
+
+##### PCA_scores
+
+```{r}
+# complete
+WSS_complete_pca <- numeric(9)
+for (i in 2:10){
+  clusters <- cutree(pca_complete_euc, k = i)
+  result <- within_variation_manual(pca_scores, clusters)
+  WSS_complete_pca[i] <- result$total_within_variation
+}
+
+WSS_complete_pca <- data.frame(
+  k = 2:10,
+  WSS = WSS_complete_pca[2:10]
+)
+
+ggplot(WSS_complete_pca, aes(x = k, y = WSS)) +
+  geom_line(color = "#2c3e50", size = 1) +
+  geom_point(color = "#e74c3c", size = 3) +
+  scale_x_continuous(breaks = 2:10) +
+  labs(
+    title = "Elbow Method: Complete Linkage (PCA)",
+    subtitle = "Analysis of Cape Town Airbnb Clusters",
+    x = "Number of Clusters (k)",
+    y = "Total Within-cluster Variation"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+##### cluster vars
+
+```{r}
+# complete
+WSS_complete_vars <- numeric(9)
+for (i in 2:10){
+  clusters <- cutree(pca_complete_euc, k = i)
+  result <- within_variation_manual(scaled_clustering_vars, clusters)
+  WSS_complete_vars[i] <- result$total_within_variation
+}
+
+WSS_complete_vars <- data.frame(
+  k = 2:10,
+  WSS = WSS_complete_vars[2:10]
+)
+
+ggplot(WSS_complete_vars, aes(x = k, y = WSS)) +
+  geom_line(color = "#2c3e50", size = 1) +
+  geom_point(color = "#e74c3c", size = 3) +
+  scale_x_continuous(breaks = 2:10) +
+  labs(
+    title = "Elbow Method: Complete Linkage (Clustering Vars)",
+    subtitle = "Analysis of Cape Town Airbnb Clusters",
+    x = "Number of Clusters (k)",
+    y = "Total Within-cluster Variation"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+consensus: k = 6
+
+#### Sillohuete method
+
+##### pca
+
+```{r}
+#complete
+fviz_nbclust(sample_pca, hcut, method = "silhouette", hc_method = "complete")
+
+```
+
+##### cluster vars
+
+```{r}
+#complete
+fviz_nbclust(sample_dat, hcut, method = "silhouette", hc_method = "complete")
+
+```
+
+consensus: k =2
+
+#### Gap stat
+
+##### pca
+
+```{r}
+set.seed(321)
+#complete
+gap_complete <- clusGap(
+  sample_pca,
+  FUNcluster = hcut,
+  hc_method = "complete",
+  K.max = 10,
+  B = 50
+)
+
+fviz_gap_stat(gap_complete)
+
+```
+
+##### cluster vars
+
+```{r}
+set.seed(321)
+#complete
+gap_complete_vars <- clusGap(
+  sample_dat,
+  FUNcluster = hcut,
+  hc_method = "complete",
+  K.max = 10,
+  B = 50
+)
+
+fviz_gap_stat(gap_complete_vars)
+
+save(gap_complete, gap_complete_vars, file = "Gap stats complete.RData")
+load("Gap stats complete.RData")
+```
+
+consensus: k = 2
+
+## Cluster Validation Summary
+
+The determination of the optimal number of clusters ($k$) involved a comparative analysis across three hierarchical linkage methods. The results below illustrate the mathematical sensitivity of the Cape Town Airbnb dataset to different clustering algorithms.
+
+| Validation Method Complete Linkage            |       |
+|-----------------------------------------------|:-----:|
+| **NbClust (Majority Vote pca sample scores)** | $k=2$ |
+| **Elbow Method (WSS)**                        | $k=6$ |
+| **Average Silhouette**                        | $k=2$ |
+| **Gap Statistic**                             | $k=1$ |
+
+## Hierarchical Cluster Selection and Validation
+
+Based on a comparative analysis of formal validation metrics, $k=2$ was selected as the optimal number of clusters for the hierarchical Complete Linkage model. While the Elbow method indicated finer structural nuances at $k=6$, a two-cluster solution provides the most statistically defensible and stable partition for the Cape Town Airbnb dataset.
+
+### Rationale for $k=2$
+
+The selection of $k=2$ is supported by the following statistical evidence:
+
+- **Majority Validation:** Both the **NbClust** majority vote and the **Average Silhouette** analysis identified $k=2$ as the most stable and well-separated global partition for this dataset.
+- **Statistical Parsimony:** Following the principle of Occam's Razor, $k=2$ is the most parsimonious model that explains the data, particularly as the **Gap Statistic** suggested a lack of complex global clustering ($k=1$).
+- **Market Interpretation:** Given the large sample size of \~15.8k observations, $k=2$ effectively captures the primary macro-structure of the market—separating "Standard" listings from "Niche/Elite" properties—without over-segmenting based on minor variances.
+
+### Comparative Perspective
+
+The hierarchical approach provides a broad macro-view of the Cape Town landscape. While it favors a simplified $k=2$ structure based on global distance measures, this serves as a critical baseline for comparison against density-based methods, which are more sensitive to local market concentrations.
+
+## Fitting complete Linkage on full pca_scores and creating 2 clusters and identifying algorithm
+
+### Cutting the tree
+
+##### PCA
+
+```{r}
+
+cut_pca_tree <- cutree(pca_complete_euc, k = 2)
+fviz_cluster(list(data = pca_scores, cluster = cut_pca_tree),
+             geom = "point", 
+             ellipse.type = "convex", 
+             ggtheme = theme_minimal(),
+             main = "Cluster Visualization (Complete Linkage, k=2)")
+
+```
+
+##### Clustering vars
+
+```{r}
+
+cut_vars_tree <- cutree(var_complete_euc, k = 2)
+fviz_cluster(list(data = scaled_clustering_vars, cluster = cut_vars_tree),
+             geom = "point", 
+             ellipse.type = "convex", 
+             ggtheme = theme_minimal(),
+             main = "Cluster Visualization (Complete Linkage, k=2)")
+```
+
+### sillhoutte method
+
+##### PCA
+
+```{r}
+sil_obj_pca <- silhouette(cut_pca_tree, pca_dist_matrix)
+
+
+fviz_silhouette(sil_obj_pca) +
+  labs(title = "Silhouette Plot: Complete Linkage (k=2)")
+
+summary(sil_obj_pca)
+
+```
+
+##### Clustering Vars
+
+```{r}
+sil_obj_vars <- silhouette(cut_vars_tree, dist_matrix)
+
+
+fviz_silhouette(sil_obj_vars) +
+  labs(title = "Silhouette Plot: Complete Linkage (k=2)")
+
+
+summary(sil_obj_vars)
+save(sil_obj_pca, sil_obj_vars, file = "sil complete.RData")
+load("sil complete.RData")
+```
+
+### Cophenetic
+
+##### PCA
+
+```{r}
+
+cophenetic_cors <- numeric(1)
+
+coph_dist_com <- cophenetic(pca_complete_euc)
+cophenetic_cors[1]<- cor(pca_dist_matrix, coph_dist_com)
+
+names(cophenetic_cors) <- c("complete")
+
+cophenetic_cors
+```
+
+##### Clustering Vars
+
+```{r}
+cophenetic_cors <- numeric(1)
+
+coph_dist_com <- cophenetic(var_complete_euc)
+cophenetic_cors[1]<- cor(dist_matrix, coph_dist_com)
+
+names(cophenetic_cors) <- c("complete")
+
+cophenetic_cors
+```
+
+### Profiling
+
+#### PCA
+
+```{r}
+pca_complete_df <- data.frame(pca_scores, cluster = cut_pca_tree)
+
+# Calculates the means for every numeric column
+pca_complete_means <- aggregate(. ~ cluster, data = pca_complete_df, FUN = mean)
+
+# View the table
+print(pca_complete_means)
+```
+
+```{r}
+plot_data <- pca_complete_means%>%
+  mutate(Market_Segment = ifelse(cluster == 1, "Standard", "Elite")) %>%
+  pivot_longer(cols = starts_with("Dim"), 
+               names_to = "Dimension", 
+               values_to = "Mean_Score")
+
+# 2. Create the plot
+ggplot(plot_data, aes(x = Dimension, y = Mean_Score, group = Market_Segment, color = Market_Segment)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  scale_color_manual(values = c("Standard" = "blue", "Elite" = "red")) +
+  labs(title = "Hierarchical Cluster Profiles: PCA Dimension Centroids",
+       subtitle = "Complete Linkage (k=2) separation of the Cape Town Airbnb Market",
+       x = "Principal Components",
+       y = "Average Centroid Score",
+       color = "Market Segment") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+##### Cluster 1: The Standard Market (Baseline)
+
+Representing the vast majority of the Cape Town dataset, this cluster defines the "average" listing. \* **Property Scale:** Standard-sized residential units (typically 1–3 bedrooms). \* **Commercial Profile:** Moderate occupancy and revenue, reflecting typical secondary-income or "mom-and-pop" rentals. \* **Positioning:** Centered at the global mean of the PCA space, these listings represent the high-density core of the market.
+
+##### Cluster 2: The Ultra-Luxury Outliers (Elite Tier)
+
+This segment represents a statistically extreme group of "super-outliers" defined by their distance from the market average. \* **Exceptional Scale (Dim.1):** With a score of +24.67, these are properties of massive proportions (e.g., 8+ bedroom villas and mansions) that carry extreme price premiums. \* **Commercial Intensity (Dim.2 & 3):** High positive scores suggest these are professionally managed, high-revenue assets, likely concentrated in prime geographic hotspots. \* **Expectation Gap (Dim.4):** Notably, Cluster 2 displays a negative score for Dimension 4. This indicates that despite their luxury status, these listings receive lower average ratings. This likely reflects a "critical guest" phenomenon, where guests paying extreme premiums hold significantly higher expectations than the market average.
+
+#### Clustering Vars
+
+```{r}
+vars_complete_df <- data.frame(clustering_variables, cluster = cut_pca_tree)
+
+# Calculates the means for every numeric column
+vars_complete_means <- aggregate(. ~ cluster, data = vars_complete_df, FUN = mean)
+
+# View the table
+print(vars_complete_means)
+```
+
+##### Segment 1: The Standard Market (Majority Baseline)
+
+Cluster 1 represents the vast majority of the dataset and serves as the baseline for the Cape Town rental market. \* **Property Scale:** These are typical residential offerings, averaging **1.8 bedrooms** and **1.68 bathrooms**, accommodating roughly **3.7 guests**. \* **Pricing & Revenue:** With an average nightly price of **R 2,238.89**, these listings generate an estimated annual revenue of **R 320,270.10**. \* **Performance:** This segment maintains a high average guest score of **4.79**, suggesting a reliable and satisfactory experience for the general traveler. \* **Geographic Positioning:** Located at an average longitude of **18.46**, these properties are distributed across the central and suburban areas of the city.
+
+##### Segment 2: The Ultra-Luxury Commercial Tier (The Elite)
+
+Cluster 2 identifies a small, statistically extreme segment of "super-properties" that operate on a completely different economic scale. \* **Exceptional Scale:** This tier consists of massive estates or boutique offerings averaging **14.25 bedrooms and bathrooms**. \* **Financial Dominance:** The pricing is extreme, averaging **R 57,041.00 per night**, which drives an average annual revenue of over **R 16.4 million**. \* **High-Intensity Management:** Despite the luxury price point, these properties maintain a **66% occupancy rate**, significantly higher than the 39% seen in the standard market. This suggests they are professional commercial assets rather than casual rentals. \* **The "Critical Guest" Phenomenon:** Notably, the average rating drops to **4.32**. This indicates that guests paying premium rates have exponentially higher expectations and are far more critical in their evaluations than those in the standard market. \* **Prime Location:** The shift in average longitude to **18.39** confirms a concentration in the high-value Atlantic Seaboard corridor.
+
+```{r}
+library(sf)
+library(tmap)
+library(dplyr)
+
+map_data <- clustering_variables %>%
+  select(Longitude, Latitude) %>% 
+  mutate(Segment = factor(cut_vars_tree, 
+                          levels = c(1, 2), 
+                          labels = c("Standard", "Elite"))) %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
+
+# 2. Reset tmap and plot
+tmap_mode("plot")
+
+tm_shape(map_data) +
+  tm_dots(col = "Segment", 
+          palette = c("blue", "red"),
+          size = 0.09,
+          alpha = 0.6,
+          title = "Airbnb Segments") +
+  tm_layout(title = "Cape Town Market Clusters",
+            legend.outside = TRUE,
+            frame = FALSE)
+
+tmap_mode("view") 
+
+
+tm_shape(map_data) +
+  tm_dots(col = "Segment", 
+          palette = c("Standard" = "blue", "Elite" = "pink"),
+          size = 0.09, 
+          alpha = 0.7,
+          title = "Airbnb Segments") + 
+  tm_view(set.view = c(18.4233, -33.9249, 11)) 
+```

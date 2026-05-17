@@ -91,6 +91,13 @@ dat <- dat %>%
   filter(Revenue_365 != 0) 
 dim(dat) # 14806 35
 
+#remove the 2 outliers where theres 50 beds and 50 baths and 32 and 10
+
+dat <- dat %>%
+  filter(
+    Bedrooms < 10,                 
+    Bathrooms < 10,                
+  )
 #####################
 # Feature engineering
 #####################
@@ -211,13 +218,13 @@ pca_scores <- pca_output$ind$coord[,1:5]
 
 For clustering purposes, the following variables have been selected:
 
--   `Price`, `Bedrooms`, `Bathrooms`
+- `Price`, `Bedrooms`, `Bathrooms`
 
--   `Reviews_per_Month`
+- `Reviews_per_Month`
 
--   `avg_score`, `occupancy_score`,
+- `avg_score`, `occupancy_score`,
 
--   `pvt_room,`, `shared_room` and `hotel_room`
+- `pvt_room,`, `shared_room` and `hotel_room`
 
 ```{r}
 #| label: cluster-vars
@@ -228,13 +235,13 @@ For clustering purposes, the following variables have been selected:
 clustering_variables <- data.frame(dat$Price, dat$Bedrooms, dat$Bathrooms, dat$Reviews_per_Month, dat$avg_score, dat$occupancy_rate, dat$shared_room, dat$pvt_room, dat$hotel_room)
 
 # # Original variables considered
-# clustering_var_orig <- clustering_variables <- data.frame(dat$Price, dat$Bedrooms, dat$Bathrooms, dat$Reviews_per_Month, dat$avg_score, dat$occupancy_rate, dat$shared_room, dat$pvt_room, dat$hotel_room, dat$Latitude, dat$Longitude)
+ clustering_var_orig <- data.frame(dat$Price, dat$Bedrooms, dat$Bathrooms, dat$Reviews_per_Month, dat$avg_score, dat$occupancy_rate, dat$shared_room, dat$pvt_room, dat$hotel_room, dat$Latitude, dat$Longitude)
 # dim(clustering_variables) # 14806 9
 
 #renamed the column names so that they didnt have dat before them
 colnames(clustering_variables) <- c("Price", "Bedrooms", "Bathrooms", "Reviews_per_Month", "avg_score", "occupancy_score", "shared_room", "pvt_room","hotel_room")
 
-# colnames(clustering_var_orig) <- c("Price", "Bedrooms", "Bathrooms", "Reviews_per_Month", "avg_score", "occupancy_score", "shared_room", "pvt_room","hotel_room", "Latitude", "Longitude")
+ colnames(clustering_var_orig) <- c("Price", "Bedrooms", "Bathrooms", "Reviews_per_Month", "avg_score", "occupancy_score", "shared_room", "pvt_room","hotel_room", "Latitude", "Longitude")
 
 # Scaled the variables 
 scaled_clustering_vars <- scale(clustering_variables)
@@ -260,6 +267,7 @@ dist_matrix <- dist(scaled_clustering_vars, method = "euclidean")
 
 # Computing complete linkage on distance matrix
 var_complete_euc <- hclust(dist_matrix, method = "complete")
+
 ```
 
 ### Determining where to cut the dendrogram
@@ -289,6 +297,8 @@ sampled_data <- clustering_variables %>%
   group_by(room_type) %>%
   slice_sample(prop = 0.33) %>%  # 33% from each room type
   ungroup()
+
+var_complete_sample <- hclust(dist(sampled_data[,-10]), method = "complete")
 ```
 
 #### Elbow method: PCA and cluster vars
@@ -344,8 +354,8 @@ within_variation_manual <- function(X, cluster) {
 # complete
 WSS_complete_vars <- numeric(9)
 for (i in 2:10){
-  clusters <- cutree(var_complete_euc, k = i)
-  result <- within_variation_manual(scaled_clustering_vars, clusters)
+  clusters <- cutree(var_complete_sample, k = i)
+  result <- within_variation_manual(sampled_data[,-10], clusters)
   WSS_complete_vars[i] <- result$total_within_variation
 }
 
@@ -359,7 +369,7 @@ ggplot(WSS_complete_vars, aes(x = k, y = WSS)) +
   geom_point(color = "#e74c3c", size = 3) +
   scale_x_continuous(breaks = 2:10) +
   labs(
-    title = "Elbow Method: Complete Linkage (Clustering Vars)",
+    title = "Elbow Method: Complete Linkage",
     subtitle = "Analysis of Cape Town Airbnb Clusters",
     x = "Number of Clusters (k)",
     y = "Total Within-cluster Variation"
@@ -374,39 +384,6 @@ ggplot(WSS_complete_vars, aes(x = k, y = WSS)) +
 
 consensus: k = 3
 
-#### NBCLUST
-
-```{r}
-#| label: HC-nbclust
-#| echo: true
-#| warning: false
-
-sampled_data <- sampled_data %>%
-  select(Price, Bedrooms, Bathrooms, Reviews_per_Month, 
-         avg_score, occupancy_score)  # NO pvt_room, shared_room, hotel_room
-
-# Scale
-sampled_data <- scale(sampled_data) %>%
-  as.data.frame()
-
-filename <- "result.rds"
-
-if (file.exists(filename)) {
-    message("Loading RDS file")
-    result <- readRDS(filename)
-  } else {
-      message("No RDS file found, Computing NbClust")
-      result <- NbClust(data = sampled_data, 
-                  distance = "euclidean",
-                  min.nc = 2, max.nc = 10,
-                  method = "complete")
-  
-    # Save model as an RDS file
-    saveRDS(result, filename)
-  }
-```
-
-consensus = 2
 
 #### Silhouette method
 
@@ -415,11 +392,11 @@ consensus = 2
 ```{r}
 #complete
 
-fviz_nbclust(sampled_data, hcut, method = "silhouette", hc_method = "complete")
+fviz_nbclust(sampled_data_scaled, hcut, method = "silhouette", hc_method = "complete")
 
 ```
 
-consensus: k =2 - 5
+consensus: k = 3
 
 #### Gap statistic
 
@@ -429,7 +406,7 @@ consensus: k =2 - 5
 set.seed(321)
 #complete
 gap_complete <- clusGap(
-  sampled_data,
+  sampled_data_scaled,
   FUNcluster = hcut,
   hc_method = "complete",
   K.max = 10,
@@ -440,36 +417,15 @@ fviz_gap_stat(gap_complete)
 
 ```
 
-consensus: k = 3-4
+consensus: k = 3
 
 ## Cluster Validation Summary
 
-The determination of the optimal number of clusters ($k$) involved a comparative analysis across three hierarchical linkage methods. The results below illustrate the mathematical sensitivity of the Cape Town Airbnb dataset to different clustering algorithms.
-
 | Validation Method Complete Linkage |          |
 |------------------------------------|:--------:|
-| **NbClust**                        |   $2$    |
-| **Elbow Method (WSS)**             |  $k=3$   |
-| **Average Silhouette**             | $k=2-5$  |
-| **Gap Statistic**                  | $k= 3-4$ |
-
-#### Hierarchical Cluster Selection and Validation
-
-Based on a comparative analysis of formal validation metrics, $k=3$ was selected as the optimal number of clusters for the hierarchical Complete Linkage model. The Elbow method demonstrated a clear inflection point at $k=3$, indicating substantial within-cluster homogeneity gains. This three-cluster solution provides the most statistically defensible and interpretable partition for the Cape Town Airbnb dataset.
-
-#### Rationale for $k=3$
-
-The selection of $k=3$ is supported by the following statistical evidence:
-
--   **Elbow Method Clarity:** The elbow plot exhibited a pronounced decrease in total within-cluster variation from $k=2$ to $k=3$, with diminishing marginal improvements thereafter. The slope flattens notably after $k=3$, indicating an optimal balance between model complexity and explanatory power.
-
--   **Gap Statistic Stability:** While the Gap Statistic identified peak separation at $k=1$ (a non-informative solution), the metric stabilized in the $k=3$ to $k=5$ range. The selection of $k=3$ represents the smallest $k$ value where the gap statistic enters this stable region, adhering to parsimony principles.
-
--   **Market Segmentation Interpretability:** The three-cluster structure captures meaningful market segments in the Cape Town Airbnb ecosystem: (1) Budget/High-Occupancy listings, (2) Mid-Range Standard properties, and (3) Premium/Niche accommodations. This aligns with observable business patterns in short-term rental markets and provides actionable strategic insights beyond a binary partition.
-
-#### Comparative Perspective
-
-The hierarchical approach with Complete Linkage provides a global distance-based perspective of the Cape Town Airbnb landscape. The $k=3$ solution balances statistical rigor from multiple validation indices (Elbow and Gap Statistic) with practical business interpretability. This serves as a robust baseline for comparison against density-based methods, which may identify alternative local clustering structures sensitive to neighborhood-level market concentrations.
+| **Elbow Method (WSS)**             |  $k = 3$ |
+| **Average Silhouette**             |  $k = 3$ |
+| **Gap Statistic**                  |  $k = 3$ |
 
 ## Fitting complete Linkage on full dataset and creating 3 clusters
 
@@ -484,7 +440,7 @@ fviz_cluster(list(data = scaled_clustering_vars, cluster = cut_vars_tree),
              geom = "point", 
              ellipse.type = "convex", 
              ggtheme = theme_minimal(),
-             main = "Cluster Visualization (Complete Linkage, k=2)")
+             main = "Cluster Visualization (Complete Linkage, k=3)")
 ```
 
 ### Silhouette method
@@ -496,7 +452,7 @@ sil_obj_vars <- silhouette(cut_vars_tree, dist_matrix)
 
 
 fviz_silhouette(sil_obj_vars) +
-  labs(title = "Silhouette Plot: Complete Linkage (k=2)")
+  labs(title = "Silhouette Plot: Complete Linkage (k=3)")
 
 
 summary(sil_obj_vars)
@@ -524,7 +480,7 @@ cophenetic_cors
 **Clustering Vars**
 
 ```{r}
-vars_complete_df <- data.frame(clustering_variables[,-10], cluster = cut_vars_tree)
+vars_complete_df <- data.frame(clustering_variables, cluster = cut_vars_tree)
 
 # Calculates the means for every numeric column
 vars_complete_means <- aggregate(. ~ cluster, data = vars_complete_df, FUN = mean)
@@ -542,74 +498,38 @@ library(dplyr)
 
 map_data <- clustering_var_orig %>%
   select(Longitude, Latitude) %>% 
+  # Ensure all cluster numbers from cut_vars_tree are mapped
   mutate(Segment = factor(cut_vars_tree, 
-                          levels = c(1, 2), 
-                          labels = c("Standard", "Elite"))) %>%
+                          levels = c(1, 2, 3), 
+                          labels = c("Standard", "Elite", "Budget"))) %>%
   st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
-
-# 2. Reset tmap and plot
-tmap_mode("plot")
-
-tm_shape(map_data) +
-  tm_dots(col = "Segment", 
-          palette = c("blue", "red"),
-          size = 0.09,
-          alpha = 0.6,
-          title = "Airbnb Segments") +
-  tm_layout(title = "Cape Town Market Clusters",
-            legend.outside = TRUE,
-            frame = FALSE)
 
 tmap_mode("view") 
 
-
 tm_shape(map_data) +
   tm_dots(col = "Segment", 
-          palette = c("Standard" = "blue", "Elite" = "pink"),
-          size = 0.1, 
+          # Update palette to match your 3 clusters
+          palette = c("Standard" = "blue", "Elite" = "deeppink", "Budget" = "orange"),
+          size = 0.05, 
           alpha = 0.7,
           title = "Airbnb Segments") + 
-  tm_view(set.view = c(18.4233, -33.9249, 11)) 
+  # Coordinates for Cape Town center
+  tm_view(set.view = c(18.4233, -33.9249, 11))
 ```
 
 # Non-Hierarchical Clustering
 
 ## DBSCAN
 
-```{r}
-
-db <- dbscan(pca_scores, eps = 1, MinPts = 5)
-db2 <- dbscan(pca_scores, eps = 1.5, minPts = 5)
-db3 <- dbscan(pca_scores, eps = 2.0, minPts = 5)
-
-fviz_cluster(db3, data = pca_scores, geom = "point")
-
-# Compare the counts
-table(db$cluster)  # Your current result
-table(db2$cluster) # Result with eps = 1.5
-table(db3$cluster) # Result with eps = 2.0
-```
-
-```{r}
-dist_db2 <- dist(pca_scores[db3$cluster != 0, ])
-sil_db2 <- silhouette(db3$cluster[db3$cluster != 0], dist_db2)
-summary(sil_db2)
-```
-
-Therefore choose 5 clusters where the 5th cluster is noise
-
-```{r}
-# 1. Combine your original data with the DBSCAN cluster IDs
-db_data <- data.frame(pca_scores, cluster = db2$cluster)
-
-# 2. Calculate the means for every numeric column
-db_means <- aggregate(. ~ cluster, data = db_data, FUN = mean)
-
-# 3. View the table
-print(db_means)
-```
-
 ### Clustering variables
+
+```{r}
+kNNdistplot(scaled_clustering_vars, k = 4)
+title(main = "DBSCAN Parameter Selection: k-Distance Plot",
+      sub = "Analysis of Cape Town Airbnb Clusters")
+#threshold line
+abline(h = 0.5, col = "red", lty = 2)
+```
 
 ```{r}
 db <- dbscan(scaled_clustering_vars, eps = 1, MinPts = 5)
@@ -617,7 +537,6 @@ db2 <- dbscan(scaled_clustering_vars, eps = 1.5, minPts = 5)
 db3 <- dbscan(scaled_clustering_vars, eps = 2.0, minPts = 5)
 db4 <- dbscan(scaled_clustering_vars, eps = 2.5, minPts = 5)
 db5 <- dbscan(scaled_clustering_vars, eps = 3.0, minPts = 5)
-fviz_cluster(db4, data = pca_scores, geom = "point")
 
 # Compare the counts
 table(db$cluster)  # Current
@@ -625,13 +544,46 @@ table(db2$cluster) # Result with eps = 1.5
 table(db3$cluster) # Result with eps = 2.0
 table(db4$cluster) # Result with eps = 2.5
 table(db5$cluster) # Result with eps = 3.0
+
+#plot for db5
+fviz_cluster(db5, data = clustering_variables[,-10], geom = "point", main = "DBSCAN Cluster plot")
 ```
 
 ```{r}
-dist_db4 <- dist(scaled_clustering_vars[db4$cluster != 0, ])
-sil_db4 <- silhouette(db4$cluster[db4$cluster != 0], dist_db4)
-summary(sil_db4)
+dist_db5 <- dist(scaled_clustering_vars[db5$cluster != 0, ])
+sil_db5 <- silhouette(db5$cluster[db5$cluster != 0], dist_db5)
+summary(sil_db5)
 ```
+
+### Cluster profiling
+```{r}
+vars_dbscan_df <- data.frame(clustering_variables, cluster = db5$cluster)
+
+# Calculates the means for every numeric column
+vars_dbscan_means <- aggregate(. ~ cluster, data = vars_dbscan_df, FUN = mean)
+
+# View the table
+print(vars_dbscan_means)
+```
+#Comparative Analysis of 2 methods 
+### ARI 
+```{r}
+# Adjusted Rand Index (ARI)
+ari_score <- adj.rand.index(cut_vars_tree, db5$cluster)
+```
+
+```{r}
+#Jaccard
+library(fossil)
+jaccard_score  <- jaccard(cut_vars_tree, db5$cluster)
+
+```
+
+```{r}
+metrics <- cbind(ari_score, jaccard_score)
+colnames(metrics) <- c("ARI", "Jaccard Index")
+```
+
 
 # Self Organising Maps
 
@@ -963,18 +915,18 @@ gap_som <- clusGap(
 fviz_gap_stat(gap_som)
 ```
 
-+------------------------------------------+---------+
-| Validation Method - Self Organising Maps |         |
-+==========================================+:=======:+
-| **NbClust**                              | $k = 2$ |
-+------------------------------------------+---------+
-| **Elbow Method (WSS)**                   | $k=2$   |
-|                                          |         |
-| -   K-means                              | $k=9$   |
-|                                          |         |
-| -   Hierarchical (Complete)              |         |
-+------------------------------------------+---------+
-| **Average Silhouette**                   | $k=2$   |
-+------------------------------------------+---------+
-| **Gap Statistic**                        | $k= 1$  |
-+------------------------------------------+---------+
++------------------------------------------+--------------+
+| Validation Method - Self Organising Maps |              |
++==========================================+:============:+
+| **NbClust**                              | $k = 2$      |
++------------------------------------------+--------------+
+| **Elbow Method (WSS)**                   | $k=2$        |
+|                                          |              |
+| - K-means                                | $k=9$        |
+|                                          |              |
+| - Hierarchical (Complete)                |              |
++------------------------------------------+--------------+
+| **Average Silhouette**                   | $k=2$        |
++------------------------------------------+--------------+
+| **Gap Statistic**                        | $k= 1$       |
++------------------------------------------+--------------+

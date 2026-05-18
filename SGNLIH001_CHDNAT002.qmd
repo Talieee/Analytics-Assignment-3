@@ -1042,17 +1042,3 @@ jaccard_DBSCAN_SOM
 metrics <- cbind(ari_score, jaccard_score)
 colnames(metrics) <- c("ARI", "Jaccard Index")
 ```
-
-+------------------------------------------+---------------+
-| Validation Method - Self Organising Maps |               |
-+------------------------------------------+---------------+
-| **Elbow Method (WSS)**                   | $k=2$         |
-|                                          |               |
-| -   K-means                              | $k=9$         |
-|                                          |               |
-| -   Hierarchical (Complete)              |               |
-+------------------------------------------+---------------+
-| **Average Silhouette**                   | $k=4$         |
-+------------------------------------------+---------------+
-| **Gap Statistic**                        | $k= 3$        |
-+------------------------------------------+---------------+

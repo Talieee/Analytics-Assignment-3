@@ -1,0 +1,1058 @@
+---
+title: "Analytics Assignment 3"
+subtitle: "Cluster Analysis: An investigation into AirBnb Listings in Cape Town"
+author: "Natalie Chidikwindi & Lihle Sigenu"
+format: pdf
+editor: visual
+---
+
+# Preliminary
+
+```{r}
+# Install libraries
+library(tidyverse)
+library(corrr)
+library(kohonen)
+library(cluster)
+library(NbClust)
+library(factoextra)
+library(FactoMineR)
+library(mclust)
+library(fpc)
+library(dbscan)
+library(viridis)
+library(sf)
+library(tmap)
+library(RColorBrewer)
+library(gridExtra)
+library(fossil)
+# Load data 
+dat <- Airbnb_Excel_Lab_AAMB_Co
+```
+
+# Exploratory Data Analysis
+
+## Data Cleaning
+
+```{r}
+#| label: data-cleaning
+#| warning: false
+#| include: false
+
+# Checking variable types and information
+str(dat)
+listings <- dat 
+
+# Dimensionality 
+dim(dat) # 16317 40; before cleaning
+head(dat)
+
+# Remove duplicates
+dat <- distinct(dat) # no duplicates were found
+
+dat <- dat %>%
+  filter(!(Bedrooms > 0 & Beds == 0)) %>%  # Remove rooms with bedrooms but no beds
+  filter(!(Bedrooms == 0 & Beds == 0))  # Remove obvious data errors
+
+# Removed the first 7 rows, did not seem relevant to what we are tyring to explore with the data 
+dat <- dat[, -c(1,2,3,4,5,6, 7)] 
+
+# Sorting out categorical variables 
+dat$Neighbourhood_Cleansed <- as.factor(dat$Neighbourhood_Cleansed)
+dat$`Room_Type_Proper & Trim` <- as.factor(dat$`Room_Type_Proper & Trim`)
+
+# roomtypeproper $ trim is the same as property type & proper trim so remove the first 1 
+dat <- dat[, -4]
+
+# Checking for missing values 
+indices_missing <- which(is.na(dat))
+missing_dat <- dat[indices_missing,]
+head(missing_dat)
+# NA'S were found for all the values there so will just remove those observations from the dataset. It was 52 observations which is less than 1% of our data set which is fine.
+
+#removed missing values 
+dat <-na.omit(dat)
+dim(dat) # 15228 32 after removing missing values 
+
+# Make dummies for categorical variables
+
+dat <- dat %>% 
+  mutate(
+    entire_home = as.integer(dat$`Room_Type_Proper & Trim` == "Entire Home/Apt"),
+    hotel_room = as.integer(dat$`Room_Type_Proper & Trim` == "Hotel Room"),
+    pvt_room = as.integer(dat$`Room_Type_Proper & Trim` == "Private Room"),
+    shared_room = as.integer(dat$`Room_Type_Proper & Trim` == "Shared Room")
+  )
+
+dat <- dat %>% 
+  select(- `Room_Type_Proper & Trim`)
+
+
+# Remove non revenue listings. They may not be beneficicial to what we are trying to determine. 
+dat <- dat %>% 
+  filter(Revenue_365 != 0) 
+dim(dat) # 14806 35
+
+#remove the 2 outliers where theres 50 beds and 50 baths and 32 and 10
+
+dat <- dat %>%
+  filter(
+    Bedrooms < 10,                 
+    Bathrooms < 10,                
+  )
+#####################
+# Feature engineering
+#####################
+
+# overall review score 
+dat <- dat %>% 
+  mutate(
+    avg_score = round((Review_Scores_Accuracy + Review_Scores_Cleanliness + Review_Scores_Checkin + Review_Scores_Communication + Review_Scores_Location + Review_Scores_Value)/6, 2)
+  )
+
+# Occupancy rate 
+dat <- dat %>% 
+  mutate(
+    occupancy_rate = round((Booked_365/365)*100, 2)
+)
+
+
+#ward averages for 70 of the wards that are not missing values and have active listings
+Ward_avg <- dat %>% 
+  group_by(Neighbourhood_Cleansed) %>% 
+  summarise_all(., mean)
+
+#remove Neighbourhood_Cleansed, we already have the geo co-ordinates
+dat <- dat %>% 
+  select(-Neighbourhood_Cleansed)
+
+# Checking highly correlated variables
+highly_corr <- dat %>% 
+  correlate() %>% 
+  stretch() %>% 
+  filter(abs(r) > 0.85) %>% 
+  arrange(desc(abs(r)))
+
+#remove availabily and booked since we have occupancy rate
+dat <- dat %>% 
+  select(- c(Booked_30, Booked_60, Booked_90, Booked_365, Availability_30, Availability_60, Availability_90, Availability_365))
+
+#remove the scores individually because captured by avg and scores rating
+dat <- dat %>% 
+  select(- c(Review_Scores_Accuracy, Review_Scores_Cleanliness, Review_Scores_Communication, Review_Scores_Location, Review_Scores_Checkin, Review_Scores_Value))
+
+#remove entire home so there is no multicollinearity
+dat <- dat[,-17]
+```
+
+## Visualization
+
+```{r}
+#| label: fig-plots
+#| echo: false
+#| warning: false
+
+# Histogram of prices
+p0 <- ggplot(listings, aes(x = Price)) +
+  geom_histogram(bins = 30, fill = "steelblue") +
+  labs(
+    title = "Dist of Listing Prices",
+    x = "Daily Price"
+  ) +
+  theme_minimal()
+
+
+# Checking average variables for different wards
+ward_data <- listings %>%  
+  group_by(Neighbourhood_Cleansed) %>% 
+  summarise(AvgPrice = mean(Price, na.rm = T),
+            AvgBedrooms = mean(Bedrooms, na.rm = T),
+            AvgBathrooms = mean(Bathrooms, na.rm = T),
+            AvgCapacity = mean(Accommodates, na.rm = T),
+            AvgRating = mean(Review_Scores_Value, na.rm = T),
+            AvgLat = mean(Latitude, na.rm =T),
+            AvgLong = mean(Longitude, na.rm = T),
+            AvgBooked = mean(Booked_365, na.rm = T)) %>% 
+  arrange(-AvgPrice)
+# Plot the average price for wards against other variables
+p1 <- ggplot(ward_data, aes(x = AvgCapacity, y = AvgPrice)) +
+  geom_point(color = "#e74c3c", size = 1.5) +
+  labs(
+    title = "Capacity vs Ward Price",
+    x = "Average Capacity",
+    y = "Average Ward Price"
+  ) +
+  theme_minimal()
+
+p2 <- ggplot(ward_data, aes(x = AvgRating, y = AvgPrice)) +
+  geom_point(color = "blue", size = 1.5) +
+  labs(
+    title = "Rating vs Ward Price",
+    x = "Average Rating",
+    y = "Average Ward Price"
+  ) +
+  theme_minimal()
+
+p3 <- ggplot(ward_data, aes(x = AvgBooked, y = AvgPrice)) +
+  geom_point(color = "green", size = 1.5) +
+  labs(
+    title = "# Booked Days vs Ward Price",
+    x = "Average Annual # of Booked Days",
+    y = "Average Ward Price"
+  ) +
+  theme_minimal()
+
+grid.arrange(
+  p0, p1, p2, p3,
+  ncol = 2
+)
+```
+
+```{r}
+#| label: fig-tmap
+#| echo: false
+#| warning: false
+
+price_bins <- cut(round(ward_data$AvgPrice,2), breaks = 5)
+
+#OR ON A TMAP
+ward_sf <- st_as_sf(
+  ward_data,
+  coords = c("AvgLong", "AvgLat"),
+  crs = 4326
+)
+tm_shape(ward_sf) +
+  tm_dots(
+    col = "AvgPrice",
+    palette = "-RdBu",
+    size = 0.5,
+    style = "cont"
+  ) +
+  tm_layout(
+    legend.outside = TRUE
+  ) + 
+  tm_basemap("Esri.WorldGrayCanvas")
+```
+
+## Principle Component Analysis
+
+```{r}
+#| label: pca
+#| echo: true
+#| warning: false
+
+# Performing PCA on selected variables
+pca_output <- PCA(dat,scale.unit = T,graph = FALSE, ncp = 10)
+fviz_eig(pca_output, main = "Scree plot of Principle Components",
+         geom = "line",
+         xlab = "Number of Principle Components")
+
+#choose the first 6 eigen values
+inerita_perc <- pca_output$eig[,3]
+
+#loadings
+pca_loadings <- pca_output$var$coord[,1:5]
+
+#scores
+pca_scores <- pca_output$ind$coord[,1:5]
+```
+
+## Clustering Variables
+
+For clustering purposes, the following variables have been selected:
+
+-   `Price`, `Bedrooms`, `Bathrooms`
+
+-   `Reviews_per_Month`
+
+-   `avg_score`, `occupancy_score`,
+
+-   `pvt_room,`, `shared_room` and `hotel_room`
+
+```{r}
+#| label: cluster-vars
+#| echo: true
+
+#for clustering variables
+# put all these variables into 1 dataframe
+clustering_variables <- data.frame(dat$Price, dat$Bedrooms, dat$Bathrooms, dat$Reviews_per_Month, dat$avg_score, dat$occupancy_rate, dat$shared_room, dat$pvt_room, dat$hotel_room)
+
+# # Original variables considered
+clustering_var_orig <- data.frame(dat$Price, dat$Bedrooms, dat$Bathrooms, dat$Reviews_per_Month, dat$avg_score, dat$occupancy_rate, dat$shared_room, dat$pvt_room, dat$hotel_room, dat$Latitude, dat$Longitude)
+# dim(clustering_variables) # 14806 9
+
+#renamed the column names so that they didnt have dat before them
+colnames(clustering_variables) <- c("Price", "Bedrooms", "Bathrooms", "Reviews_per_Month", "avg_score", "occupancy_score", "shared_room", "pvt_room","hotel_room")
+
+colnames(clustering_var_orig) <- c("Price", "Bedrooms", "Bathrooms", "Reviews_per_Month", "avg_score", "occupancy_score", "shared_room", "pvt_room","hotel_room", "Latitude", "Longitude")
+
+# Scaled the variables 
+scaled_clustering_vars <- scale(clustering_variables)
+```
+
+# Hierarchical Clustering
+
+## Distance Matrix
+
+```{r}
+#| label: dist-matrix
+
+# Compute distance matrix using eucl dist
+dist_matrix <- dist(scaled_clustering_vars, method = "euclidean")
+```
+
+## Complete Linkage
+
+```{r}
+#| label: complete-linkage
+#| echo: true
+#| warning: false
+
+# Computing complete linkage on distance matrix
+var_complete_euc <- hclust(dist_matrix, method = "complete")
+```
+
+### Determining where to cut the dendrogram
+
+Decided to use NbClust to find how many clusters for Complete Linkage, the silhouette method, elbow method and Gap statistic.
+
+#### Subsetting the data
+
+Decided to use a sample of the data to do the choosing of k as the HC methods are computationally exhaustive
+
+```{r}
+#| label: sub-sampling
+#| echo: true
+
+#the sample is 1k obs for each
+set.seed(321)
+clustering_variables <- clustering_variables %>%
+  mutate(room_type = case_when(
+    pvt_room == 1 ~ "private",
+    shared_room == 1 ~ "shared",
+    hotel_room == 1 ~ "hotel",
+    TRUE ~ "other"
+  ))
+
+# Stratified sample - proportional to room types
+sampled_data <- clustering_variables %>%
+  group_by(room_type) %>%
+  slice_sample(prop = 0.33) %>%  # 33% from each room type
+  ungroup()
+
+var_complete_sample <- hclust(dist(sampled_data[,-10]), method = "complete")
+```
+
+#### Elbow method: PCA and cluster vars
+
+```{r}
+#| label: within-variation-function
+#| echo: true
+#| warning: false
+
+within_variation_manual <- function(X, cluster) {
+  
+  clusters <- unique(cluster)
+  results <- data.frame(
+    cluster = clusters,
+    n = NA,
+    within_variation = NA
+  )
+  
+  total_within <- 0
+  
+  for (k in clusters) {
+    
+    # Points in cluster k
+    Xk <- X[cluster == k, , drop = FALSE]
+    
+    # Cluster centroid
+    centroid <- colMeans(Xk)
+    
+    # Squared distances to centroid
+    squared_distances <- rowSums((sweep(Xk, 2, centroid, "-"))^2)
+    
+    # Within variation for cluster k
+    Wk <- sum(squared_distances)
+    
+    results[results$cluster == k, "n"] <- nrow(Xk)
+    results[results$cluster == k, "within_variation"] <- Wk
+    
+    total_within <- total_within + Wk
+  }
+  
+  list(
+    by_cluster = results,
+    total_within_variation = total_within
+  )
+}
+```
+
+```{r}
+#| label: wss-complete
+#| echo: true
+#| warning: false
+
+# complete
+WSS_complete_vars <- numeric(9)
+for (i in 2:10){
+  clusters <- cutree(var_complete_sample, k = i)
+  result <- within_variation_manual(scaled_clustering_vars, clusters)
+  WSS_complete_vars[i] <- result$total_within_variation
+}
+
+WSS_complete_vars <- data.frame(
+  k = 2:10,
+  WSS = WSS_complete_vars[2:10]
+)
+
+ggplot(WSS_complete_vars, aes(x = k, y = WSS)) +
+  geom_line(color = "#2c3e50", size = 1) +
+  geom_point(color = "#e74c3c", size = 3) +
+  scale_x_continuous(breaks = 2:10) +
+  labs(
+    title = "Elbow Method: Complete Linkage",
+    subtitle = "Analysis of Cape Town Airbnb Clusters",
+    x = "Number of Clusters (k)",
+    y = "Total Within-cluster Variation"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+consensus: k = 3
+
+#### Silhouette method
+
+**cluster vars**
+
+```{r}
+#complete
+
+fviz_nbclust(sampled_data_scaled, hcut, method = "silhouette", hc_method = "complete")
+
+```
+
+consensus: k =2 - 5
+
+#### Gap statistic
+
+**pca**
+
+```{r}
+set.seed(321)
+#complete
+gap_complete <- clusGap(
+  sampled_data_scaled,
+  FUNcluster = hcut,
+  hc_method = "complete",
+  K.max = 10,
+  B = 50
+)
+
+fviz_gap_stat(gap_complete)
+
+```
+
+consensus: k = 3-4
+
+## Cluster Validation Summary
+
+| Validation Method Complete Linkage |         |
+|------------------------------------|:-------:|
+| **Elbow Method (WSS)**             | $k = 3$ |
+| **Average Silhouette**             | $k = 3$ |
+| **Gap Statistic**                  | $k = 3$ |
+
+## Fitting complete Linkage on full dataset and creating 3 clusters
+
+### Cutting the tree
+
+**Clustering vars**
+
+```{r}
+
+cut_vars_tree <- cutree(var_complete_euc, k = 3)
+fviz_cluster(list(data = scaled_clustering_vars, cluster = cut_vars_tree),
+             geom = "point", 
+             ellipse.type = "convex", 
+             ggtheme = theme_minimal(),
+             main = "Cluster Visualization (Complete Linkage, k=3)")
+```
+
+### Silhouette method
+
+**Clustering Vars**
+
+```{r}
+sil_obj_vars <- silhouette(cut_vars_tree, dist_matrix)
+
+
+fviz_silhouette(sil_obj_vars) +
+  labs(title = "Silhouette Plot: Complete Linkage (k=3)")
+
+
+summary(sil_obj_vars)
+```
+
+### Cophenetic
+
+**PCA**
+
+**Clustering Vars**
+
+```{r}
+cophenetic_cors <- numeric(1)
+
+coph_dist_com <- cophenetic(var_complete_euc)
+cophenetic_cors[1]<- cor(dist_matrix, coph_dist_com)
+
+names(cophenetic_cors) <- c("complete")
+
+cophenetic_cors
+```
+
+### Cluster Profiling
+
+**Clustering Vars**
+
+```{r}
+vars_complete_df <- data.frame(clustering_variables, cluster = cut_vars_tree)
+
+# Calculates the means for every numeric column
+vars_complete_means <- aggregate(. ~ cluster, data = vars_complete_df, FUN = mean)
+
+# View the table
+print(vars_complete_means)
+
+
+```
+
+```{r}
+library(sf)
+library(tmap)
+library(dplyr)
+
+map_data <- clustering_var_orig %>%
+  select(Longitude, Latitude) %>% 
+  mutate(Segment = factor(cut_vars_tree, 
+                          levels = c(1, 2, 3), 
+                          labels = c("Standard", "Elite", "Budget"))) %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
+
+# 2. Reset tmap and plot
+tmap_mode("plot")
+
+tm_shape(map_data) +
+  tm_dots(col = "Segment", 
+          palette = c("blue", "red"),
+          size = 0.09,
+          alpha = 0.6,
+          title = "Airbnb Segments") +
+  tm_layout(title = "Cape Town Market Clusters",
+            legend.outside = TRUE,
+            frame = FALSE)
+
+tmap_mode("view") 
+
+
+tm_shape(map_data) +
+  tm_dots(col = "Segment", 
+          palette = c("Standard" = "blue", "Elite" = "deeppink", budget = "orange"),
+          size = 0.05, 
+          alpha = 0.7,
+          title = "Airbnb Segments") + 
+  # Coordinates for Cape Town center
+  tm_view(set.view = c(18.4233, -33.9249, 11)) 
+```
+
+# Non-Hierarchical Clustering
+
+## DBSCAN
+
+### Clustering variables
+
+```{r}
+kNNdistplot(scaled_clustering_vars, k = 4)
+title(main = "DBSCAN Parameter Selection: k-Distance Plot",
+      sub = "Analysis of Cape Town Airbnb Clusters")
+#threshold line
+abline(h = 0.5, col = "red", lty = 2)
+```
+
+```{r}
+db <- dbscan(scaled_clustering_vars, eps = 1, MinPts = 5)
+db2 <- dbscan(scaled_clustering_vars, eps = 1.5, minPts = 5)
+db3 <- dbscan(scaled_clustering_vars, eps = 2.0, minPts = 5)
+db4 <- dbscan(scaled_clustering_vars, eps = 2.5, minPts = 5)
+db5 <- dbscan(scaled_clustering_vars, eps = 3.0, minPts = 5)
+# Compare the counts
+table(db$cluster)  # Current
+table(db2$cluster) # Result with eps = 1.5
+table(db3$cluster) # Result with eps = 2.0
+table(db4$cluster) # Result with eps = 2.5
+table(db5$cluster) # Result with eps = 3.0
+
+#plot for db5
+fviz_cluster(db5, data = clustering_variables[,-10], geom = "point", main = "DBSCAN Cluster plot")
+```
+
+```{r}
+dist_db5 <- dist(scaled_clustering_vars[db5$cluster != 0, ])
+sil_db5 <- silhouette(db5$cluster[db5$cluster != 0], dist_db5)
+summary(sil_db5)
+```
+
+### Cluster profiling
+
+```{r}
+vars_dbscan_df <- data.frame(clustering_variables, cluster = db5$cluster)
+
+# Calculates the means for every numeric column
+vars_dbscan_means <- aggregate(. ~ cluster, data = vars_dbscan_df, FUN = mean)
+
+# View the table
+print(vars_dbscan_means)
+```
+
+#Comparative Analysis of 2 methods \### ARI
+
+```{r}
+# Adjusted Rand Index (ARI)
+ari_score <- adj.rand.index(cut_vars_tree, db5$cluster)
+```
+
+```{r}
+#Jaccard
+library(fossil)
+jaccard_score  <- jaccard(cut_vars_tree, db5$cluster)
+```
+
+```{r}
+metrics <- cbind(ari_score, jaccard_score)
+colnames(metrics) <- c("ARI", "Jaccard Index")
+```
+
+# Self Organising Maps
+
+```{r}
+#| label: Architecture
+#| echo: true
+#| warning: false
+
+# How many nodes in the grid? Grid Size
+k <- 44
+l <- 44
+m <- k*l # total number of nodes in grid
+
+# How many weights, each node m_i has p weights
+p <- dim(scaled_clustering_vars)[2] # num of variables in input space
+w <- p*m
+
+# Create SOM grid
+som_grid <- somgrid(xdim = k, ydim=l, topo="hexagonal")
+```
+
+```{r}
+#| label: som-model
+#| echo: true
+#| warning: false
+
+set.seed(3145)
+
+model_file <- "som_model.rds"
+
+if (file.exists(model_file)) {
+    message("Loading RDS file")
+    som_model <- readRDS(model_file)
+  } else {
+      message("No RDS file found, Computing Model")
+      som_model <- som(scaled_clustering_vars, # Input space
+                 grid   = som_grid, # Grid space
+                 rlen   = 10000, # Number of iterations 
+                 alpha  =c(0.05,0.01), # Learning rate, smaller the better, try decreasing over time
+                 keep.data = TRUE  )
+  
+    # Save model as an RDS file
+    saveRDS(som_model, model_file)
+    }
+
+# Show the average variable values for each of the 400 nodes in the grid
+SomModelCodes = som_model$codes[[1]]
+
+# Plot the distributions of each variables from the nodes
+for (i in 1:dim(SomModelCodes)[2]){
+  plot(SomModelCodes[,i], ylab = colnames(scaled_clustering_vars)[i])
+}
+```
+
+## Quality Control - For Model
+
+### Training Process
+
+As the model iterates, a node's weights becomes similar to the samples in it. So we expect the distance between node weights and node samples to decrease as the iterations increase until a plateau is reached. If this is not the case, then more iterations are required.
+
+```{r}
+#| label: training-changes-plot
+#| echo: true
+#| warning: false
+
+plot(som_model,type="changes")
+```
+
+### Node Counts
+
+Visualization of the number of observations in each node enables map quality assessment. An ideal model has a uniform distribution of observations across the grid. Large values in a few areas indicates a larger map requirement, while a sparse map with empty nodes indicates a smaller grid.
+
+```{r}
+#| label: node-counts-plot
+#| warning: false
+#| include: false
+
+plot(som_model,type="count")
+```
+
+Pretty reasonable spread, with only 5% of the nodes containing zero obs
+
+### U-Matrix
+
+The U-Matrix sums up the distances of the observations from all of its immediate neighbours. Low neighbour distance implies very similar observations. Areas of low distance imply that the nodes are very similar to each other.
+
+```{r}
+#| label: distance-plot
+#| warning: false
+#| include: false
+
+plot(som_model, type="dist.neighbours")
+```
+
+This is a good distance plot. A lot of the nodes are very similar to their immediate neighbours. Only 3 are dissimilar-reflecting that those observations are naturally very unique.
+
+### Quantization Error
+
+This compares the observations to the vector code representing them. It measures how well the observations are represented by their node (and its vector code).
+
+```{r}
+#| label: quantization-plot
+#| warning: false
+#| include: false
+
+plot(som_model,type="quality")
+```
+
+A lot of the nodes have a low distance meaning the observations contained in them are very well represented by their node. This model accurately represents the observations.
+
+## Individual Plots for variables
+
+### Vector Code Plots
+
+As mentioned above, the node vectors are representative of the observations contained in them. They average the observations contained across the variables. The below plot shows the magnitude of each variable in each node e.g the node in the top right has large values for price, revenue, accommodates and are usually entire homes.
+
+```{r}
+#| label: vec-code-plot
+#| warning: false
+#| include: false
+
+plot(som_model, type="codes", palette.name = rainbow)
+```
+
+### Heatmaps
+
+Generating heat maps for each variable across the nodes. This shows which nodes contain the highest magnitude for each variable. This is important for investigating the distribution of each variable across the nodes and seeing the profiles of each neighbourhood. Could this be done for two variables at a time?
+
+```{r}
+#| label: heatmaps
+#| echo: false
+#| warning: true
+
+##################################################
+# Create Palettes for each of the variables
+##################################################
+priceRamp <- function(n, alpha = 1) {
+  colorRampPalette(
+    c(
+      "#08306B",  # dark blue
+      "#1A9850",  # green
+      "#FFFFBF",  # yellow
+      "#FDAE61",  # orange
+      "#D73027"   # red
+    ),
+    alpha = FALSE
+  )(n)
+}
+
+##################################################
+# Create heatmaps using the corresponding pallettes
+##################################################
+
+par(mfrow = c(3,3), mar = c(1,1,4,1), oma = c(0,0,2,0))
+for (i in 1:dim(SomModelCodes)[2]){
+  plot(
+  som_model,
+  type = "property",
+  property = SomModelCodes[, i],
+  main = "",
+  keepMargins = TRUE,
+  palette.name = priceRamp
+  )
+  mtext(
+    text = colnames(SomModelCodes)[i],
+    side = 3,          # top of plot
+    line = 0.5,        # how far above the plot border (increase if still clipped)
+    cex  = 0.85,
+    font = 2           # bold
+  )
+}
+
+```
+
+## Creating Clusters from Self Organising Map
+
+```{r}
+#| label: clusters-from-som
+#| echo: false
+#| warning: false
+
+# # of observations to cluster
+length(som_model$unit.classif)
+
+# Show assignment of last 20 observations
+tail(som_model$unit.classif, 20)
+
+# Show table of nodes and number of observations in them
+node_counts <- table(som_model$unit.classif)
+mean(node_counts)
+
+# Compute summary of quantization error
+summary(
+  sqrt(
+    rowSums(
+      (scaled_clustering_vars - som_model$codes[[1]][som_model$unit.classif, ])^2
+    )
+  )
+)
+```
+
+### Apply K-means Clustering to Code vectors:
+
+Applying k-means determines the number of clusters to specify the nodes. Split the nodes into K clusters and determine the within sum of squares to maximize how similar the nodes within each cluster are to each other. From the plot, we see a reasonable K to select is 3 clusters.
+
+```{r}
+#| label: code-vector-kmeans
+#| echo: false
+#| warning: false
+
+# Compute within sum of squares for different values of K-clusters
+set.seed(3145)
+wss <- (nrow(SomModelCodes)-1)*sum(apply(SomModelCodes,2,var)) 
+for (i in 2:15) {
+  wss[i] <- sum(kmeans(SomModelCodes, centers=i)$withinss)
+}
+plot(wss, type = "b")
+```
+
+### Apply (Complete) Hierarchical Clustering To Code Vectors
+
+```{r}
+#| label: HC-on-code-vectors
+#| echo: false
+#| warning: false
+
+SomModelCodes = som_model$codes[[1]]
+# Compute distances between SOM codebook vectors
+som_dist <- dist(SomModelCodes, method = "euclidean") 
+
+set.seed(3145)
+# Perform hierarchical clustering on those distances
+hierarchicalcluster <- hclust(som_dist, method = "complete") 
+
+# Add a cluster column to the vector codes
+cluster <- c(0)
+SomModelCodes <- cbind(SomModelCodes, cluster)
+
+# different number of clusters:
+totwithinss = NA
+wss0 <- sum(rowSums((sweep(SomModelCodes, 2, colMeans(SomModelCodes), "-"))^2))
+totwithinss[1] = wss0
+
+
+for (k in 2:15){
+  cluster = cutree(hierarchicalcluster, k=k) # obtain new clusters 
+  SomModelCodes[,10] <- cluster # assign new clusters to code vectors
+  
+  # group by cluster k, compute ss for that cluster, add to tss
+  kss <- 0
+  for (c in 1:k){ # group each cluster and compute its ss
+    current_cluster <- SomModelCodes[SomModelCodes[, dim(SomModelCodes)[2]] == c, 1:6,drop = FALSE]
+    kss <- kss + rowSums((sweep(current_cluster, 2, colMeans(current_cluster), "-"))^2)
+  }
+  totwithinss[k] <- kss # Add this k's ss to the vector of ss's
+}
+
+# Create a dataframe of k's and their corresponding within SS
+wss_df <- data.frame(
+  k = 2:15,
+  WSS = totwithinss[-1]
+)
+
+# Plot the K and its within SS
+ggplot(wss_df, aes(x = k, y = WSS)) +
+  geom_line() +
+  geom_point(size = 3) +
+  scale_x_continuous(breaks = 1:15) +
+  labs(
+    title = "Elbow Plot for Complete Linkage Clustering",
+    x = "Number of clusters (K)",
+    y = "Total within-cluster sum of squares"
+  ) +
+  theme_minimal()
+```
+
+## NbClust
+
+```{r}
+#| label: som-nbclust
+#| echo: false
+
+SomModelCodes = som_model$codes[[1]]
+result <- NbClust(data = SomModelCodes, 
+                  distance = "euclidean",
+                  min.nc = 2, max.nc = 10,
+                  method = "complete")
+```
+
+## Silhouette Plots
+
+```{r}
+#| label: som-sil
+#| echo: false
+#| warning: false
+
+SomModelCodes = som_model$codes[[1]]
+fviz_nbclust(SomModelCodes, hcut, method = "silhouette", hc_method = "complete")
+```
+
+## Gap Analysis
+
+```{r}
+#| label: som-gap
+#| echo: false
+#| warning: false
+
+SomModelCodes = som_model$codes[[1]]
+set.seed(321)
+#complete
+gap_som <- clusGap(
+  SomModelCodes,
+  FUNcluster = hcut,
+  hc_method = "complete",
+  K.max = 10,
+  B = 50
+)
+
+fviz_gap_stat(gap_som)
+```
+
+### Add clusters from HC back to SOM
+
+```{r}
+#| label: plot-som-with-clusters
+#| warning: true
+#| include: false
+
+# get clusters for each node
+som.hc <- cutree(hierarchicalcluster, k = 4)
+
+# get cluster assignments for each obs
+cluster_assignments <- som.hc[som_model$unit.classif]
+
+# Add clusters back to original variables
+# convert data to df
+clustering_vars_df <- as.data.frame(clustering_variables)
+
+# Assign cluster column
+clustering_vars_df$cluster <- as.factor(cluster_assignments)
+
+```
+
+```{r}
+#| label: viz-som-clusters
+#| echo: false
+#| warning: false
+
+fviz_cluster(
+  list(
+    data    = clustering_vars_df[, !names(clustering_vars_df) %in% "cluster"],
+    cluster = cluster_assignments
+  ),
+  geom         = "point",
+  ellipse.type = "convex",
+  main         = "Hierarchical Clusters on SOM (PCA projection)"
+)
+```
+
+```{r}
+#| label: cluster profiles
+#| echo: false
+#| warning: false
+
+cluster_profiles <- clustering_vars_df %>%
+  group_by(cluster) %>%
+  summarise(
+    across(where(is.numeric), mean, .names = "{.col}"),
+    n = n()
+  ) %>%
+  mutate(pct = round(n / sum(n) * 100, 1))
+
+print(cluster_profiles)
+```
+
+#Comparative Analysis of 3 methods \### ARI
+
+```{r}
+#| label: som vs HC
+#| echo: false
+# Adjusted Rand Index (ARI) between HC & SOM 
+ari_HC_SOM <- adj.rand.index(cut_vars_tree, cluster_assignments)
+ari_HC_SOM
+
+# Jaccards between HC & SOm
+jaccard_HC_SOM  <- jaccard(cut_vars_tree, cluster_assignments)
+jaccard_HC_SOM
+```
+
+```{r}
+#| label: som vs DBSCAN
+#| echo: false
+
+# Adjusted Rand Index (ARI) between HC & SOM 
+ari_DBSCAN_SOM <- adj.rand.index(db5$cluster, cluster_assignments)
+ari_DBSCAN_SOM
+
+# Jaccards between HC & SOm
+jaccard_DBSCAN_SOM  <- jaccard(db5$cluster, cluster_assignments)
+jaccard_DBSCAN_SOM
+```
+
+```{r}
+metrics <- cbind(ari_score, jaccard_score)
+colnames(metrics) <- c("ARI", "Jaccard Index")
+```
+
++------------------------------------------+---------------+
+| Validation Method - Self Organising Maps |               |
++------------------------------------------+---------------+
+| **Elbow Method (WSS)**                   | $k=2$         |
+|                                          |               |
+| -   K-means                              | $k=9$         |
+|                                          |               |
+| -   Hierarchical (Complete)              |               |
++------------------------------------------+---------------+
+| **Average Silhouette**                   | $k=4$         |
++------------------------------------------+---------------+
+| **Gap Statistic**                        | $k= 3$        |
++------------------------------------------+---------------+
